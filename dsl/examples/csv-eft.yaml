@@ -1,0 +1,27 @@
+version: 1
+name: csv_eft_to_canonical_v1
+source:
+  format: csv
+  root: none
+  fields:
+    txnRef: "$.1"
+    accFrom: "$.2"
+    accTo: "$.3"
+    amount: "$.4"
+    currency: "$.5"
+target:
+  model: CanonicalPayment
+mappings:
+  txnId: "hash_sha256(txnRef, accFrom, accTo, amount)"
+  amount: "to_decimal(amount)"
+  currency: "coalesce(currency,'ZAR')"
+  rail: "'EFT'"
+validations:
+  - rule: "amount > 0"
+    code: "AMT_POS"
+    message: "Amount must be positive"
+udfs:
+  - name: hash_sha256
+    type: wasm
+    module: wasm/hash.wasm
+    func: hash

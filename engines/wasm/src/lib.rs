@@ -1,0 +1,1 @@
+// placeholder\n#[no_mangle]\npub extern "C" fn hello() {}\n

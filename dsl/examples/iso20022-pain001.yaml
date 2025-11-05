@@ -1,0 +1,27 @@
+version: 1
+name: pain001_to_canonical_v1
+source:
+  format: xml
+  root: /Document/CstmrCdtTrfInitn/PmtInf/CdtTrfTxInf
+  fields:
+    endToEndId: "PmtId/EndToEndId/text()"
+    amount: "Amt/InstdAmt/text()"
+    currency: "Amt/InstdAmt/@Ccy"
+    debtorIban: "DbtrAcct/Id/IBAN/text()"
+    creditorIban: "CdtrAcct/Id/IBAN/text()"
+target:
+  model: CanonicalPayment
+mappings:
+  txnId: "hash_sha256(endToEndId, debtorIban, creditorIban, amount)"
+  amount: "to_decimal(amount)"
+  rail: "'ISO20022'"
+  currency: "currency"
+validations:
+  - rule: "amount > 0"
+    code: "AMT_POS"
+    message: "Amount must be positive"
+udfs:
+  - name: hash_sha256
+    type: wasm
+    module: wasm/hash.wasm
+    func: hash
