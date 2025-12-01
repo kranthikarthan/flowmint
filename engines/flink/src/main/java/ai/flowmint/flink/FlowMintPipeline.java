@@ -1,7 +1,9 @@
 package ai.flowmint.flink;
 
 import ai.flowmint.flink.loader.PlanLoader;
+import ai.flowmint.flink.model.Lineage;
 import ai.flowmint.flink.model.Plan;
+import ai.flowmint.flink.sink.LineageSink;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -37,6 +39,10 @@ public class FlowMintPipeline {
         
         LOG.info("Starting FlowMint pipeline with plan: {}, input: {}", planPath, inputPath);
         
+        // Create lineage object
+        String fileId = new Path(inputPath).getName();
+        Lineage lineage = new Lineage(fileId, "mock-hash"); // Mock hash for now
+        
         // Load plan
         PlanLoader loader = new PlanLoader();
         Plan plan;
@@ -68,12 +74,17 @@ public class FlowMintPipeline {
         
         // Process records with metrics
         DataStream<String> processed = lines
-                .map(new RecordProcessorFunction(plan))
+                .map(new RecordProcessorFunction(plan, lineage))
                 .name("RecordProcessor");
         
         // Sink to console
         processed.addSink(new PrintSinkFunction<>("Processed: "))
                 .name("ConsoleSink");
+        
+        // Sink lineage
+        DataStream<Lineage> lineageStream = env.fromElements(lineage);
+        lineageStream.addSink(new LineageSink("./lineage"))
+                .name("LineageSink");
         
         // Execute pipeline
         env.execute("FlowMint Pipeline: " + plan.getName());
@@ -89,9 +100,11 @@ public class FlowMintPipeline {
         private transient Counter recordCounter;
         private transient Meter recordRate;
         private final Plan plan;
-        
-        public RecordProcessorFunction(Plan plan) {
+        private final Lineage lineage;
+
+        public RecordProcessorFunction(Plan plan, Lineage lineage) {
             this.plan = plan;
+            this.lineage = lineage;
         }
         
         @Override
@@ -111,6 +124,7 @@ public class FlowMintPipeline {
         public String map(String value) throws Exception {
             // Increment counter
             recordCounter.inc();
+            lineage.incrementRecordCount();
             
             // Log every 100 records
             long count = recordCounter.getCount();

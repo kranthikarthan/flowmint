@@ -1,0 +1,165 @@
+@startuml
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #3367D6
+  LifeLineBorderColor #3C4043
+  LifeLineBackgroundColor #E8F0FE
+  ParticipantBorderColor #3C4043
+  ParticipantBackgroundColor #FFFFFF
+}
+
+title Multi-Tenant File Flow Manager – End-to-End with Tenant Isolation & RLS
+
+actor "Tenant User A" as UserA
+
+participant "API Gateway\n(Control Plane)" as APIGW
+participant "AuthService / IdP" as Auth
+participant "FlowDefinitionService" as FlowSvc
+database "Config DB\n(FlowDefs + RLS by tenant_id)" as ConfigDB
+
+participant Scheduler
+participant "IngressAdapter\n(SFTP/Blob/NFS)" as Adapter
+participant "EventBus\n(Job Queue)" as Bus
+participant "Worker\n(Flow Processor)" as Worker
+participant "FlowOrchestrator" as Orchestrator
+participant "Parser" as Parser
+participant "ValidationEngine" as Validator
+participant "TransformationEngine" as Transformer
+participant "RoutingEngine" as Router
+database "Metadata DB\n(Jobs/Records + RLS by tenant_id)" as MDB
+collections "Object Store\n(Raw/Processed Files)" as OS
+
+== 0. Control Plane – Create Flow for Tenant A ==
+
+UserA -> APIGW: POST /flows\n(Authorization: Bearer token)
+APIGW -> Auth: introspect/verify(token)
+Auth --> APIGW: { sub, tenant_id="tenantA", scopes... }
+
+note right of APIGW
+  API Gateway attaches tenant context:
+  X-Tenant-Id: tenantA
+end note
+
+APIGW -> FlowSvc: createFlow(flowSpec, tenantId="tenantA")
+FlowSvc -> ConfigDB: INSERT FlowDefinition(flowId, ..., tenant_id="tenantA")
+ConfigDB --> FlowSvc: ok
+FlowSvc --> APIGW: 201 Created (flowId)
+APIGW --> UserA: Flow registered for tenantA
+
+== 1. Scheduler – Tenant-Aware File Discovery ==
+
+Scheduler -> ConfigDB: SELECT active flows\nWHERE status='ACTIVE'
+ConfigDB --> Scheduler: FlowDefs for tenantA, tenantB, ...
+
+loop For each tenant/flow
+  Scheduler -> Adapter: poll(sourceConfig, tenantId)
+  Adapter --> Scheduler: DiscoveredFile(s)\n(tagged tenantId)
+  Scheduler -> Bus: publish(FileDiscoveredEvent\n{flowId, tenantId, fileMeta})
+end
+
+== 2. Worker Picks Job with Tenant Context ==
+
+Worker -> Bus: subscribe()
+Bus --> Worker: FileDiscoveredEvent\n{flowId, tenantId="tenantA", ...}
+
+note right of Worker
+  Worker sets tenant context for this job:
+  tenantId = "tenantA"
+end note
+
+Worker -> Orchestrator: handleDiscoveredFile(file, tenantId="tenantA")
+
+== 3. File Acquisition (Tenant-Tagged) ==
+
+Orchestrator -> Adapter: open(file, tenantId="tenantA")
+Adapter --> Orchestrator: InputStream
+
+Orchestrator -> OS: store raw file\n(path includes tenantA)
+OS --> Orchestrator: rawFileUri
+
+note right of Orchestrator
+  All downstream metadata includes tenant_id="tenantA"
+end note
+
+Orchestrator -> MDB: SET app.tenant_id = 'tenantA'
+Orchestrator -> MDB: INSERT FileIngestJob\n(jobId, flowId, tenant_id="tenantA", status='RECEIVED')
+MDB --> Orchestrator: ok
+
+== 4. Load Tenant-Scoped Flow Definition ==
+
+Orchestrator -> ConfigDB: SET app.tenant_id = 'tenantA'
+Orchestrator -> ConfigDB: SELECT * FROM FlowDefinition\nWHERE id = flowId
+ConfigDB --> Orchestrator: flowDef (RLS ensures tenant_id = 'tenantA')
+
+note right of ConfigDB
+  RLS policy example:
+  USING (tenant_id = current_setting('app.tenant_id'))
+end note
+
+== 5. Parsing (Shared Code, Tenant-Scoped Data) ==
+
+Orchestrator -> Parser: create(flowDef.parserConfig, InputStream)
+Parser --> Orchestrator: parser
+
+loop for each record
+  Orchestrator -> Parser: nextRecord()
+  Parser --> Orchestrator: Record / ParseError
+end
+
+== 6. Validation (Tenant-Specific Rules/Schemas) ==
+
+loop for each parsed record
+  Orchestrator -> Validator: validate(record, flowDef.validationConfig)
+  Validator --> Orchestrator: ValidationResult(valid/invalid)
+
+  opt invalid
+    Orchestrator -> MDB: INSERT RecordStatus\n(jobId, recordIdx, status='INVALID', tenant_id="tenantA")
+  end
+end
+
+== 7. Transformation ==
+
+loop for each valid record
+  Orchestrator -> Transformer: transform(record, flowDef.transformConfig)
+  Transformer --> Orchestrator: TransformedRecord
+end
+
+== 8. Routing (Tenant-Aware Destinations) ==
+
+Orchestrator -> Router: beginTransaction(jobId, tenantId="tenantA")
+
+loop for each transformed record
+  Orchestrator -> Router: route(record, flowDef.routingConfig)
+  Router --> Orchestrator: DeliveryStatus
+end
+
+Orchestrator -> Router: commit(jobId)
+
+== 9. Finalization with RLS ==
+
+Orchestrator -> MDB: UPDATE FileIngestJob\nSET status='COMPLETED'\nWHERE jobId = ...
+MDB --> Orchestrator: ok
+
+Orchestrator -> Adapter: ack(file)\n(move to tenantA archive)
+Adapter --> Orchestrator: archived
+
+Orchestrator --> Worker: job completed (tenantA)
+
+== 10. Failure/RLS Guarantee (Simplified) ==
+
+group Tenant Isolation Guarantees
+  note over ConfigDB, MDB
+    - All tables have tenant_id column
+    - RLS ensures:
+      - Tenant A can never see Tenant B rows
+      - Shared infra, isolated data
+  end note
+end group
+
+group Example: Parse Error for Tenant A
+  Parser --> Orchestrator: ParseError
+  Orchestrator -> MDB: UPDATE FileIngestJob\nSET status='FAILED'\nWHERE jobId = ... AND tenant_id='tenantA'
+  Orchestrator -> Adapter: nack(file)
+end
+
+@enduml

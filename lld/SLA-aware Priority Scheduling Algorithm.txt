@@ -1,0 +1,254 @@
+Below is the **correct, MAANG-grade, production-grade answer**:
+You need a **SLA-aware Priority Scheduling Algorithm** that considers *End Time*, *Remaining Time*, *File Size*, *Service Criticality*, and *Current Backlog*.
+
+And YES — there are specific algorithms (used by Airline scheduling, OS kernels, Kafka, Spark, Uber dispatching, etc.) that solve *exactly this*.
+
+---
+
+# ✅ **THE CORE ALGORITHM YOU NEED**
+
+## **👉 Earliest Deadline First (EDF) Scheduling + Weighted Priority Queue**
+
+This is the **industry standard** when you must process things **before a deadline**.
+
+### Why EDF works:
+
+* Each file belongs to a sub-service with an **end time (deadline)**.
+* EDF always processes the file with the **closest deadline** first.
+* It guarantees that if ANY algorithm can meet the deadlines, **EDF will**.
+
+Perfect fit for SOD/EOD + SLA windows.
+
+---
+
+# 🟥 **1. Earliest Deadline First (EDF): MAIN ALGORITHM**
+
+Each file becomes a job:
+
+```
+job.deadline = subService.endTime (EOD)
+job.startTime = last SOD event
+```
+
+Put all jobs in a **min-heap priority queue** sorted by `deadline`.
+
+### **Priority formula**
+
+```
+priority = deadlineTimestamp
+```
+
+Min-heap always gives the earliest end-time first → **guaranteed safe scheduling**.
+
+### Data structure:
+
+```
+PriorityQueue<FileJob> pq (sorted ascending by deadline)
+```
+
+---
+
+# ⭐ **BUT EDF ALONE IS NOT ENOUGH IN YOUR CASE**
+
+Because different sub-services:
+
+* process very different file sizes
+* have multiple files per minute
+* have varying tenant priority
+* have SOD/EOD dependencies
+* need “catch-up mode” if already behind
+
+So you need an **enhanced version of EDF**.
+
+---
+
+# 🟧 **2. Enhanced SLA-Aware EDF (What Stripe, Uber, AWS use)**
+
+### Final priority = EDF + remaining work estimation
+
+Use this formula:
+
+```
+priority_score =
+    α * (deadlineTimestamp - now)
+  + β * fileEstimatedProcessingTime
+  + γ * subServiceCriticality
+  + δ * currentBacklogWeight
+```
+
+Where:
+
+* **α** → importance of deadline
+* **β** → prefer small files first (if needed)
+* **γ** → business criticality (VIP tenants, payments > reporting)
+* **δ** → load-aware fairness
+
+Sort by **lowest score = highest priority**.
+
+---
+
+# 🧠 **Recommended Values (Banking/PAYMENTS Grade)**
+
+* α = 0.6 → deadlines most important
+* β = 0.2 → file size matters but not too much
+* γ = 0.15 → VIP tenants matter
+* δ = 0.05 → backlog control
+
+These weights can be dynamic & updated by ML (Stripe does this).
+
+---
+
+# 🟦 **3. Shortest Remaining Time First (SRTF) - When Files Differ Greatly in Size**
+
+If one sub-service submits:
+
+* 20 small files
+* 1 huge file
+
+SRTF avoids starvation.
+
+Combine it inside EDF:
+
+### Remaining time estimation:
+
+```
+estimatedRemainingTime = fileSize / systemThroughputPerSecond
+```
+
+Add this into the priority formula.
+
+---
+
+# 🟩 **4. Multi-Dimensional Fair Queuing (Based on Kafka/Spark)**
+
+Ensures:
+
+* no tenant is starved
+* no sub-service hogs the CPU
+* all SLA windows respected
+
+Works like:
+
+* each tenant/sub-service gets a “fair share”
+* but EDF pulls urgent ones first
+* fair share counters reset every minute
+
+This prevents fairness issues.
+
+---
+
+# 🟪 **5. Preemption Algorithm (Optional for High-SLA Environments)**
+
+If a near-deadline file arrives:
+
+* Preempt current worker
+* Move current job back to priority queue
+* Start urgent job immediately
+
+This is the same algorithm used in:
+
+* Linux CFS scheduler
+* AWS Lambda queues
+* Spark/YARN cluster scheduler
+
+---
+
+# 🟨 **6. Example: Putting It All Together**
+
+### Consider:
+
+| Sub-service | End Time | File Size | Estimated Processing Time |
+| ----------- | -------- | --------- | ------------------------- |
+| EFT         | 17:00    | 50 MB     | 60s                       |
+| BatchPay    | 17:30    | 100 MB    | 90s                       |
+| Salary      | 18:00    | 5 MB      | 10s                       |
+
+### EDF picks:
+
+1. EFT
+2. BatchPay
+3. Salary
+
+### But enhanced EDF may pick:
+
+1. EFT (deadline nearest)
+2. Salary (small + quick + avoid backlog)
+3. BatchPay (heaviest job last)
+
+This ensures no SLA breach + no starvation.
+
+---
+
+# 🔥 **FINAL ANSWER – ALGORITHMS TO USE**
+
+Below is the complete list you need:
+
+---
+
+## ✔ **1. Earliest Deadline First (EDF)**
+
+> Primary algorithm for deadline-based sub-services (SOD/EOD).
+
+---
+
+## ✔ **2. Weighted Priority Queue (Custom priority based on SLA)**
+
+> Best when tenants/services have different SLA importance.
+
+---
+
+## ✔ **3. Shortest Remaining Time First (SRTF)**
+
+> Prevents large files from blocking smaller ones.
+
+---
+
+## ✔ **4. Multi-Dimensional Fair Queuing (Tenant-aware fairness)**
+
+> Ensures no sub-service or tenant hogs resources.
+
+---
+
+## ✔ **5. Preemptive Scheduling**
+
+> Critical for when deadlines are very tight, similar to OS kernel schedulers.
+
+---
+
+## ✔ **6. Optional: ML-based ETA predictor**
+
+> Used in enterprise-grade data pipelines.
+> Predicts file processing time in real-time to adjust queue priorities.
+
+---
+
+# 🧩 Data structures you MUST use
+
+| Component           | DSA                                          | Why                       |
+| ------------------- | -------------------------------------------- | ------------------------- |
+| Priority queue      | Min-heap                                     | Efficient EDF             |
+| Sub-service buckets | HashMap                                      | Per-service QoS           |
+| Backlog tracker     | Ring buffer                                  | Sliding window for volume |
+| File ETA calculator | Regression model OR dynamic weighted average | Better scheduling         |
+
+---
+
+# 🎯 **In One Line**
+
+**Use an Enhanced EDF Scheduler with a Weighted Priority Queue and optional SRTF + Fair Queuing + Preemption to ensure sub-services close to end-of-day get processed first.**
+
+---
+
+If you want, I can generate:
+
+### 🔹 PlantUML sequence diagram for the EDF scheduler
+
+### 🔹 Pseudocode implementation for EDF + SRTF + fairness
+
+### 🔹 Class Diagram for Scheduler + PriorityQueue
+
+### 🔹 Performance tuning strategy
+
+### 🔹 Unit tests + integration tests for the scheduler
+
+Just tell me.

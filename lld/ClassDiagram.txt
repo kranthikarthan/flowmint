@@ -1,0 +1,324 @@
+@startuml
+skinparam shadowing false
+skinparam class {
+  BackgroundColor #FFFFFF
+  BorderColor #3367D6
+}
+
+title File Flow Manager - Core OO Class Model
+
+' ==== Core Domain Entities ====
+
+class Tenant {
+  - tenantId : String
+  - name : String
+  - active : boolean
+}
+
+class FlowDefinition {
+  - flowId : Long
+  - tenantId : String
+  - name : String
+  - version : int
+  - status : FlowStatus
+  - sourceType : SourceType
+  - filenamePattern : String
+  - scheduleCron : String
+  - parserConfig : ParserConfig
+  - validationConfig : ValidationConfig
+  - transformConfig : TransformConfig
+  - routingConfig : RoutingConfig
+}
+
+enum FlowStatus {
+  ACTIVE
+  DISABLED
+  DEPRECATED
+}
+
+enum SourceType {
+  SFTP
+  FILE_SYSTEM
+  HTTP_UPLOAD
+  OBJECT_STORE
+}
+
+class ParserConfig {
+  - parserConfigId : Long
+  - tenantId : String
+  - name : String
+  - parserType : ParserType
+  - configJson : String
+}
+
+enum ParserType {
+  CSV
+  FIXED
+  XML
+  JSON
+}
+
+class ValidationConfig {
+  - validationConfigId : Long
+  - tenantId : String
+  - name : String
+  - schemaType : String
+  - schemaRef : String
+  - rulesJson : String
+  - dedupeExpression : String
+  - dedupeWindowMinutes : Integer
+}
+
+class TransformConfig {
+  - transformConfigId : Long
+  - tenantId : String
+  - name : String
+  - targetFormat : String
+  - mappingSpecRef : String
+  - mappingJson : String
+}
+
+class RoutingConfig {
+  - routingConfigId : Long
+  - tenantId : String
+  - name : String
+  - routes : List<RouteEntry>
+}
+
+class RouteEntry {
+  - routeId : Long
+  - sequenceNo : int
+  - conditionExpr : String
+  - targetType : TargetType
+  - targetRef : String
+  - deliverySemantics : DeliverySemantics
+}
+
+enum TargetType {
+  KAFKA
+  DB
+  FILE
+  HTTP
+  MQ
+}
+
+enum DeliverySemantics {
+  AT_LEAST_ONCE
+  EXACTLY_ONCE_BEST_EFFORT
+}
+
+class FileIngestJob {
+  - jobId : Long
+  - tenantId : String
+  - flow : FlowDefinition
+  - externalFileId : String
+  - sourceType : SourceType
+  - rawLocation : String
+  - status : JobStatus
+  - totalRecords : int
+  - validRecords : int
+  - invalidRecords : int
+  - startedAt : Instant
+  - completedAt : Instant
+  - errorSummary : String
+  - correlationId : UUID
+}
+
+enum JobStatus {
+  RECEIVED
+  PARSING
+  VALIDATING
+  TRANSFORMING
+  ROUTING
+  COMPLETED
+  FAILED
+  PARTIAL_SUCCESS
+  ABORTED
+}
+
+class RecordStatus {
+  - recordId : Long
+  - job : FileIngestJob
+  - recordIndex : int
+  - businessKey : String
+  - status : RecordState
+  - errorCodes : List<String>
+  - createdAt : Instant
+}
+
+enum RecordState {
+  PARSED
+  VALID
+  INVALID
+  TRANSFORMED
+  ROUTED
+  DROPPED
+  ERROR
+}
+
+class DedupeEntry {
+  - dedupeId : Long
+  - tenantId : String
+  - flowId : Long
+  - dedupeKey : String
+  - firstSeenAt : Instant
+  - expiresAt : Instant
+}
+
+' ==== Service / Engine Interfaces ====
+
+class IngressAdapter {
+  + List<DiscoveredFile> poll(NewFileCursor cursor)
+  + InputStream open(DiscoveredFile file)
+  + void ack(DiscoveredFile file)
+  + void nack(DiscoveredFile file, FailureReason reason)
+}
+
+class SftpIngressAdapter
+class FsIngressAdapter
+class ObjectStoreIngressAdapter
+class HttpUploadIngressAdapter
+
+IngressAdapter <|.. SftpIngressAdapter
+IngressAdapter <|.. FsIngressAdapter
+IngressAdapter <|.. ObjectStoreIngressAdapter
+IngressAdapter <|.. HttpUploadIngressAdapter
+
+class DiscoveredFile {
+  + sourceId : String
+  + path : String
+  + sizeBytes : long
+  + lastModified : Instant
+  + tags : Map<String,String>  ' includes tenantId
+}
+
+class FlowOrchestrator {
+  - flowRepository : FlowRepository
+  - jobRepository : FileIngestJobRepository
+  - recordRepository : RecordStatusRepository
+  - parserFactory : ParserFactory
+  - validationEngine : ValidationEngine
+  - transformationEngine : TransformationEngine
+  - routingEngine : RoutingEngine
+  - ingressRegistry : IngressAdapterRegistry
+  + void handleDiscoveredFile(DiscoveredFile file, TenantContext ctx)
+}
+
+class TenantContext {
+  + tenantId : String
+  + correlationId : UUID
+}
+
+class Parser {
+  + Stream<Record> records()
+}
+
+class ParserFactory {
+  + Parser create(ParserConfig config, InputStream input)
+}
+
+class Record {
+  + Map<String,Object> fields
+}
+
+class ValidationEngine {
+  + ValidationResult validate(Record record, ValidationConfig config, TenantContext ctx)
+}
+
+class ValidationResult {
+  + boolean valid
+  + List<String> errorCodes
+}
+
+class TransformationEngine {
+  + TransformedRecord transform(Record record, TransformConfig config, TenantContext ctx)
+}
+
+class TransformedRecord {
+  + Map<String,Object> fields
+  + String targetFormat
+}
+
+class RoutingEngine {
+  + void beginTransaction(Long jobId, TenantContext ctx)
+  + void route(TransformedRecord record, RoutingConfig cfg, Long jobId, long index, TenantContext ctx)
+  + void commit(Long jobId)
+  + void rollback(Long jobId)
+}
+
+class RouteHandler {
+  + void send(TransformedRecord record, RouteEntry entry, TenantContext ctx)
+}
+
+class KafkaRouteHandler
+class DbRouteHandler
+class FileRouteHandler
+class HttpRouteHandler
+class MqRouteHandler
+
+RouteHandler <|.. KafkaRouteHandler
+RouteHandler <|.. DbRouteHandler
+RouteHandler <|.. FileRouteHandler
+RouteHandler <|.. HttpRouteHandler
+RouteHandler <|.. MqRouteHandler
+
+RoutingEngine "1" o-- "*" RouteHandler : uses
+
+' ==== Repositories (Persistence Ports) ====
+
+class FlowRepository {
+  + FlowDefinition findById(String tenantId, Long flowId)
+  + FlowDefinition matchFlow(String tenantId, DiscoveredFile file)
+}
+
+class FileIngestJobRepository {
+  + FileIngestJob createJob(FlowDefinition flow, DiscoveredFile file, TenantContext ctx)
+  + void updateStatus(Long jobId, JobStatus status, String errorSummary)
+  + void incrementCounters(Long jobId, int validDelta, int invalidDelta)
+}
+
+class RecordStatusRepository {
+  + void saveStatus(RecordStatus status)
+}
+
+class DedupeStore {
+  + boolean exists(String tenantId, Long flowId, String key)
+  + void save(DedupeEntry entry)
+}
+
+' ==== Relationships ====
+
+Tenant "1" <-- "*" FlowDefinition : owns >
+Tenant "1" <-- "*" FileIngestJob
+Tenant "1" <-- "*" ParserConfig
+Tenant "1" <-- "*" ValidationConfig
+Tenant "1" <-- "*" TransformConfig
+Tenant "1" <-- "*" RoutingConfig
+
+FlowDefinition "1" o-- "1" ParserConfig
+FlowDefinition "1" o-- "1" ValidationConfig
+FlowDefinition "1" o-- "1" TransformConfig
+FlowDefinition "1" o-- "1" RoutingConfig
+RoutingConfig "1" o-- "*" RouteEntry
+
+FlowDefinition "1" <-- "*" FileIngestJob
+FileIngestJob "1" <-- "*" RecordStatus
+FileIngestJob "1" <-- "*" DedupeEntry
+
+FlowOrchestrator --> FlowRepository
+FlowOrchestrator --> FileIngestJobRepository
+FlowOrchestrator --> RecordStatusRepository
+FlowOrchestrator --> ParserFactory
+FlowOrchestrator --> ValidationEngine
+FlowOrchestrator --> TransformationEngine
+FlowOrchestrator --> RoutingEngine
+FlowOrchestrator --> IngressAdapterRegistry
+FlowOrchestrator ..> TenantContext
+
+ParserFactory --> Parser
+ValidationEngine --> ValidationResult
+TransformationEngine --> TransformedRecord
+RoutingEngine --> RoutingConfig
+RoutingEngine --> RouteHandler
+
+@enduml

@@ -1,0 +1,1048 @@
+## 0. Schemas & Setup
+
+```sql
+-- Optional: separate schemas for app tables and security objects
+CREATE SCHEMA app;
+GO
+
+CREATE SCHEMA security;
+GO
+```
+
+---
+
+## 1. Tenant Table (Optional but Recommended)
+
+```sql
+CREATE TABLE app.Tenant (
+    tenant_id      NVARCHAR(64) NOT NULL PRIMARY KEY,
+    name           NVARCHAR(256) NOT NULL,
+    is_active      BIT NOT NULL CONSTRAINT DF_Tenant_IsActive DEFAULT (1),
+    created_at     DATETIME2(3) NOT NULL CONSTRAINT DF_Tenant_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at     DATETIME2(3) NULL
+);
+GO
+```
+
+---
+
+## 2. Connection & Config Tables (Multi-tenant, RLS enabled)
+
+### 2.1 ConnectionConfig
+
+```sql
+CREATE TABLE app.ConnectionConfig (
+    connection_id   BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id       NVARCHAR(64) NOT NULL,
+    name            NVARCHAR(200) NOT NULL,
+    connection_type NVARCHAR(50) NOT NULL,  -- SFTP, BLOB, KAFKA, DB, HTTP
+    config_json     NVARCHAR(MAX) NOT NULL, -- encrypted or protected as needed
+    is_active       BIT NOT NULL CONSTRAINT DF_Conn_IsActive DEFAULT (1),
+    created_at      DATETIME2(3) NOT NULL CONSTRAINT DF_Conn_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at      DATETIME2(3) NULL,
+    CONSTRAINT PK_ConnectionConfig PRIMARY KEY CLUSTERED (tenant_id, connection_id),
+    CONSTRAINT FK_ConnectionConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+GO
+```
+
+### 2.2 ParserConfig
+
+```sql
+CREATE TABLE app.ParserConfig (
+    parser_config_id BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id        NVARCHAR(64) NOT NULL,
+    name             NVARCHAR(200) NOT NULL,
+    parser_type      NVARCHAR(50) NOT NULL, -- CSV, FIXED, XML, JSON
+    config_json      NVARCHAR(MAX) NOT NULL,
+    created_at       DATETIME2(3) NOT NULL CONSTRAINT DF_Parser_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at       DATETIME2(3) NULL,
+    CONSTRAINT PK_ParserConfig PRIMARY KEY CLUSTERED (tenant_id, parser_config_id),
+    CONSTRAINT FK_ParserConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+GO
+```
+
+### 2.3 ValidationConfig
+
+```sql
+CREATE TABLE app.ValidationConfig (
+    validation_config_id BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id            NVARCHAR(64) NOT NULL,
+    name                 NVARCHAR(200) NOT NULL,
+    schema_type          NVARCHAR(50) NOT NULL,  -- CSV_SCHEMA, XSD, JSON_SCHEMA, CUSTOM
+    schema_ref           NVARCHAR(512) NULL,     -- URI / path
+    rules_json           NVARCHAR(MAX) NULL,     -- rule DSL / expressions
+    dedupe_expression    NVARCHAR(512) NULL,     -- expression for key
+    dedupe_window_minutes INT NULL,
+    created_at           DATETIME2(3) NOT NULL CONSTRAINT DF_Val_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at           DATETIME2(3) NULL,
+    CONSTRAINT PK_ValidationConfig PRIMARY KEY CLUSTERED (tenant_id, validation_config_id),
+    CONSTRAINT FK_ValidationConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+GO
+```
+
+### 2.4 TransformConfig
+
+```sql
+CREATE TABLE app.TransformConfig (
+    transform_config_id BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id           NVARCHAR(64) NOT NULL,
+    name                NVARCHAR(200) NOT NULL,
+    target_format       NVARCHAR(50) NOT NULL, -- CSV, JSON, XML, DB_ROW
+    mapping_spec_ref    NVARCHAR(512) NULL,    -- URI/path to mapping spec
+    mapping_json        NVARCHAR(MAX) NULL,    -- inline mapping if needed
+    created_at          DATETIME2(3) NOT NULL CONSTRAINT DF_Trans_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at          DATETIME2(3) NULL,
+    CONSTRAINT PK_TransformConfig PRIMARY KEY CLUSTERED (tenant_id, transform_config_id),
+    CONSTRAINT FK_TransformConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+GO
+```
+
+### 2.5 RoutingConfig
+
+```sql
+CREATE TABLE app.RoutingConfig (
+    routing_config_id BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id         NVARCHAR(64) NOT NULL,
+    name              NVARCHAR(200) NOT NULL,
+    created_at        DATETIME2(3) NOT NULL CONSTRAINT DF_Route_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at        DATETIME2(3) NULL,
+    CONSTRAINT PK_RoutingConfig PRIMARY KEY CLUSTERED (tenant_id, routing_config_id),
+    CONSTRAINT FK_RoutingConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+GO
+
+CREATE TABLE app.RoutingConfigRoute (
+    routing_route_id   BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id          NVARCHAR(64) NOT NULL,
+    routing_config_id  BIGINT NOT NULL,
+    sequence_no        INT NOT NULL,
+    condition_expr     NVARCHAR(1000) NULL,
+    target_type        NVARCHAR(50) NOT NULL,   -- KAFKA, DB, FILE, HTTP, MQ
+    target_ref         NVARCHAR(512) NOT NULL,  -- usually FK->ConnectionConfig.name or similar
+    delivery_semantics NVARCHAR(50) NOT NULL,   -- AT_LEAST_ONCE, EXACTLY_ONCE
+    created_at         DATETIME2(3) NOT NULL CONSTRAINT DF_RRoute_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at         DATETIME2(3) NULL,
+    CONSTRAINT PK_RoutingConfigRoute PRIMARY KEY CLUSTERED (tenant_id, routing_route_id),
+    CONSTRAINT FK_RRouting_RoutingConfig FOREIGN KEY (tenant_id, routing_config_id)
+        REFERENCES app.RoutingConfig(tenant_id, routing_config_id)
+);
+GO
+```
+
+---
+
+## 3. FlowDefinition Table
+
+```sql
+CREATE TABLE app.FlowDefinition (
+    flow_id              BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id            NVARCHAR(64) NOT NULL,
+    name                 NVARCHAR(200) NOT NULL,
+    version              INT NOT NULL CONSTRAINT DF_Flow_Version DEFAULT (1),
+    status               NVARCHAR(50) NOT NULL, -- ACTIVE, DISABLED, DEPRECATED
+    source_type          NVARCHAR(50) NOT NULL, -- SFTP, FS, HTTP, BLOB
+    source_connection_id BIGINT NOT NULL,       -- FK to ConnectionConfig
+    filename_pattern     NVARCHAR(512) NOT NULL,
+    schedule_cron        NVARCHAR(128) NULL,
+    parser_config_id     BIGINT NOT NULL,
+    validation_config_id BIGINT NOT NULL,
+    transform_config_id  BIGINT NOT NULL,
+    routing_config_id    BIGINT NOT NULL,
+    created_at           DATETIME2(3) NOT NULL CONSTRAINT DF_Flow_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    updated_at           DATETIME2(3) NULL,
+    CONSTRAINT PK_FlowDefinition PRIMARY KEY CLUSTERED (tenant_id, flow_id),
+    CONSTRAINT FK_Flow_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id),
+    CONSTRAINT FK_Flow_ConnectionConfig FOREIGN KEY (tenant_id, source_connection_id)
+        REFERENCES app.ConnectionConfig(tenant_id, connection_id),
+    CONSTRAINT FK_Flow_ParserConfig FOREIGN KEY (tenant_id, parser_config_id)
+        REFERENCES app.ParserConfig(tenant_id, parser_config_id),
+    CONSTRAINT FK_Flow_ValidationConfig FOREIGN KEY (tenant_id, validation_config_id)
+        REFERENCES app.ValidationConfig(tenant_id, validation_config_id),
+    CONSTRAINT FK_Flow_TransformConfig FOREIGN KEY (tenant_id, transform_config_id)
+        REFERENCES app.TransformConfig(tenant_id, transform_config_id),
+    CONSTRAINT FK_Flow_RoutingConfig FOREIGN KEY (tenant_id, routing_config_id)
+        REFERENCES app.RoutingConfig(tenant_id, routing_config_id)
+);
+GO
+
+CREATE INDEX IX_FlowDefinition_Status_Name
+    ON app.FlowDefinition (tenant_id, status, name);
+GO
+
+ALTER TABLE app.FlowDefinition
+ADD service NVARCHAR(100) NULL,
+    sub_service NVARCHAR(100) NULL;
+
+```
+
+---
+
+## 4. Runtime Tables: FileIngestJob, RecordStatus, DedupeStore
+
+### 4.1 FileIngestJob
+
+```sql
+CREATE TABLE app.FileIngestJob (
+    job_id           BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id        NVARCHAR(64) NOT NULL,
+    flow_id          BIGINT NOT NULL,
+    external_file_id NVARCHAR(512) NOT NULL,  -- path/filename/source reference
+    source_type      NVARCHAR(50) NOT NULL,
+    raw_location     NVARCHAR(512) NULL,      -- URI in object store
+    status           NVARCHAR(50) NOT NULL,   -- RECEIVED, PARSING, VALIDATING, ...
+    total_records    INT NULL,
+    valid_records    INT NULL,
+    invalid_records  INT NULL,
+    started_at       DATETIME2(3) NOT NULL CONSTRAINT DF_Job_Started DEFAULT (SYSUTCDATETIME()),
+    completed_at     DATETIME2(3) NULL,
+    error_summary    NVARCHAR(MAX) NULL,
+    correlation_id   UNIQUEIDENTIFIER NOT NULL CONSTRAINT DF_Job_Corr DEFAULT NEWID(),
+    row_version      ROWVERSION,
+    CONSTRAINT PK_FileIngestJob PRIMARY KEY CLUSTERED (tenant_id, job_id),
+    CONSTRAINT FK_Job_FlowDefinition FOREIGN KEY (tenant_id, flow_id)
+        REFERENCES app.FlowDefinition(tenant_id, flow_id)
+);
+GO
+
+CREATE INDEX IX_FileIngestJob_Flow_Status
+    ON app.FileIngestJob (tenant_id, flow_id, status, started_at DESC);
+GO
+```
+
+### 4.2 RecordStatus
+
+```sql
+CREATE TABLE app.RecordStatus (
+    record_id     BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id     NVARCHAR(64) NOT NULL,
+    job_id        BIGINT NOT NULL,
+    record_index  INT NOT NULL,
+    business_key  NVARCHAR(256) NULL,
+    status        NVARCHAR(50) NOT NULL,    -- VALID, INVALID, ROUTED, DROPPED
+    error_codes   NVARCHAR(1000) NULL,      -- comma/JSON list of codes
+    created_at    DATETIME2(3) NOT NULL CONSTRAINT DF_Record_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT PK_RecordStatus PRIMARY KEY CLUSTERED (tenant_id, record_id),
+    CONSTRAINT UQ_RecordStatus_Job_RecordIndex UNIQUE (tenant_id, job_id, record_index),
+    CONSTRAINT FK_RecordStatus_Job FOREIGN KEY (tenant_id, job_id)
+        REFERENCES app.FileIngestJob(tenant_id, job_id)
+);
+GO
+
+CREATE INDEX IX_RecordStatus_Job_Status
+    ON app.RecordStatus (tenant_id, job_id, status);
+GO
+```
+
+### 4.3 DedupeStore (for idempotency keys)
+
+```sql
+CREATE TABLE app.DedupeStore (
+    dedupe_id       BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id       NVARCHAR(64) NOT NULL,
+    flow_id         BIGINT NOT NULL,
+    dedupe_key      NVARCHAR(512) NOT NULL,
+    first_seen_at   DATETIME2(3) NOT NULL CONSTRAINT DF_Dedupe_FirstSeen DEFAULT (SYSUTCDATETIME()),
+    expires_at      DATETIME2(3) NULL,
+    CONSTRAINT PK_DedupeStore PRIMARY KEY CLUSTERED (tenant_id, dedupe_id),
+    CONSTRAINT UQ_DedupeStore_Key UNIQUE (tenant_id, flow_id, dedupe_key),
+    CONSTRAINT FK_Dedupe_FlowDefinition FOREIGN KEY (tenant_id, flow_id)
+        REFERENCES app.FlowDefinition(tenant_id, flow_id)
+);
+GO
+
+CREATE INDEX IX_DedupeStore_Expiry
+    ON app.DedupeStore (tenant_id, expires_at);
+GO
+```
+
+---
+
+## 5. RLS Predicate Function (Tenant Isolation)
+
+In SQL Server / Azure SQL, RLS uses predicate functions.
+We’ll use `SESSION_CONTEXT('tenant_id')` from the app layer.
+
+### 5.1 App: set tenant context per session
+
+Your app code should do this once per connection:
+
+```sql
+EXEC sys.sp_set_session_context 
+     @key = N'tenant_id', 
+     @value = @TenantId;  -- e.g., 'tenantA'
+```
+
+### 5.2 RLS Predicate Function
+
+```sql
+CREATE FUNCTION security.fn_tenant_access(@tenant_id NVARCHAR(64))
+RETURNS TABLE
+WITH SCHEMABINDING
+AS
+RETURN
+(
+    SELECT 1 AS access_result
+    WHERE 
+        @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS NVARCHAR(64))
+        OR IS_ROLEMEMBER('db_owner') = 1
+        OR IS_ROLEMEMBER('tenant_admin') = 1   -- optional custom role
+);
+GO
+```
+
+---
+
+## 6. RLS Security Policy (Reuse Same Predicate Across Tables)
+
+You can choose to:
+
+* Use **one policy per table**, or
+* Use **one policy with multiple tables** (as below).
+
+```sql
+CREATE SECURITY POLICY security.TenantRlsPolicy
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.Tenant,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ConnectionConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ParserConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ValidationConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.TransformConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RoutingConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RoutingConfigRoute,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FlowDefinition,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FileIngestJob,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RecordStatus,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.DedupeStore,
+
+-- Optional BLOCK predicates to prevent cross-tenant writes:
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ConnectionConfig AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ConnectionConfig AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ParserConfig AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ParserConfig AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ValidationConfig AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ValidationConfig AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.TransformConfig AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.TransformConfig AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RoutingConfig AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RoutingConfig AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FlowDefinition AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FlowDefinition AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FileIngestJob AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FileIngestJob AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RecordStatus AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.RecordStatus AFTER UPDATE,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.DedupeStore AFTER INSERT,
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.DedupeStore AFTER UPDATE
+
+WITH (STATE = ON);
+GO
+```
+
+---
+
+## 7. How Your App Uses This (High-Level)
+
+* On each DB connection (EF, Spring, Go, whatever), **after auth**:
+
+  * Call `sp_set_session_context 'tenant_id', <tenant>`
+
+* All queries like:
+
+  ```sql
+  SELECT * FROM app.FileIngestJob WHERE flow_id = @flowId;
+  ```
+
+  are automatically filtered to `tenant_id = SESSION_CONTEXT('tenant_id')`.
+
+* Admins in `db_owner` or `tenant_admin` see across tenants if needed (for ops).
+
+---
+
+Below is the **updated, production-grade DDL** for **SLA, business calendars, schedule windows, and SLA stage tracking**, designed for **Azure SQL Managed Instance / MS SQL Server** and aligned with:
+
+* Multi-tenant architecture
+* Full RLS (Row-Level Security)
+* Your existing File Flow Manager schema
+* End-to-end SLA lifecycle (Detection → Processing → Validation → Routing → Completion)
+* Region-specific or tenant-specific holiday calendars
+* Cut-off windows
+* SLA severity + alerting rules
+
+This is the **exact schema used in enterprise-grade payment file gateways**.
+
+---
+
+# ✅ 1. SLA Config Tables
+
+(Attached directly to FlowDefinition, multi-tenant aware)
+
+### **1.1 SLAConfig**
+
+Each FlowDefinition can reference one SLA config.
+
+```sql
+CREATE TABLE app.SLAConfig (
+    sla_config_id      BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id          NVARCHAR(64) NOT NULL,
+    name               NVARCHAR(200) NOT NULL,
+
+    max_detection_delay_ms   INT NULL,    -- File discovered → job created
+    max_processing_time_ms   INT NULL,    -- Job start → completed
+    max_routing_delay_ms     INT NULL,    -- Last transformation → final routings
+    max_total_time_ms        INT NULL,    -- End-to-end file SLA
+
+    severity            NVARCHAR(20) NOT NULL DEFAULT 'MEDIUM', -- LOW/MEDIUM/HIGH/CRITICAL
+    alert_channels      NVARCHAR(512) NULL,   -- CSV or JSON (email, teams, sms, dynatrace webhook)
+
+    created_at          DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at          DATETIME2(3) NULL,
+
+    CONSTRAINT PK_SLAConfig PRIMARY KEY CLUSTERED (tenant_id, sla_config_id),
+    CONSTRAINT UQ_SLAConfig_TenantName UNIQUE (tenant_id, name),
+    CONSTRAINT FK_SLAConfig_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+```
+
+---
+
+# ✅ 2. Schedule Window Table
+
+Controls non-working hours & cut-off processing.
+
+### **2.1 ScheduleWindow**
+
+```sql
+CREATE TABLE app.ScheduleWindow (
+    schedule_window_id BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id          NVARCHAR(64) NOT NULL,
+    name               NVARCHAR(200) NOT NULL,
+
+    allowed_start_time TIME NOT NULL,         -- e.g. '06:00'
+    allowed_end_time   TIME NOT NULL,         -- e.g. '21:00'
+    timezone           NVARCHAR(64) NOT NULL, -- e.g. 'Africa/Johannesburg'
+
+    violation_policy   NVARCHAR(50) NOT NULL  -- SHIFT_TO_NEXT_WINDOW | REJECT | ALERT_ONLY
+
+    created_at         DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at         DATETIME2(3) NULL,
+
+    CONSTRAINT PK_ScheduleWindow PRIMARY KEY CLUSTERED (tenant_id, schedule_window_id),
+    CONSTRAINT UQ_ScheduleWindow_TenantName UNIQUE (tenant_id, name),
+    CONSTRAINT FK_ScheduleWindow_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+```
+
+---
+
+# ✅ 3. Business Calendar Tables
+
+Support global + regional + tenant-specific holidays.
+
+### **3.1 BusinessCalendarDefinition**
+
+```sql
+CREATE TABLE app.BusinessCalendar (
+    calendar_id     BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id       NVARCHAR(64) NOT NULL,
+    region          NVARCHAR(64) NOT NULL,      -- "ZA", "IN", "EU", etc.
+    name            NVARCHAR(200) NOT NULL,     -- e.g. "ZA-2025-Calendar"
+    use_default_holidays BIT NOT NULL DEFAULT 1,
+
+    created_at      DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    updated_at      DATETIME2(3) NULL,
+
+    CONSTRAINT PK_BusinessCalendar PRIMARY KEY CLUSTERED (tenant_id, calendar_id),
+    CONSTRAINT UQ_BusinessCalendar UNIQUE (tenant_id, name),
+    CONSTRAINT FK_BusinessCalendar_Tenant FOREIGN KEY (tenant_id)
+        REFERENCES app.Tenant(tenant_id)
+);
+```
+
+### **3.2 HolidayEntry**
+
+```sql
+CREATE TABLE app.HolidayEntry (
+    holiday_id    BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id     NVARCHAR(64) NOT NULL,
+    calendar_id   BIGINT NOT NULL,
+    holiday_date  DATE NOT NULL,
+    description   NVARCHAR(256) NULL,
+
+    CONSTRAINT PK_HolidayEntry PRIMARY KEY CLUSTERED (tenant_id, holiday_id),
+    CONSTRAINT FK_HolidayEntry_Calendar FOREIGN KEY (tenant_id, calendar_id)
+        REFERENCES app.BusinessCalendar(tenant_id, calendar_id)
+);
+```
+
+---
+
+# ✅ 4. Wire SLA/Schedule/Calendar to FlowDefinition
+
+Add foreign keys to your existing `FlowDefinition`:
+
+```sql
+ALTER TABLE app.FlowDefinition
+ADD sla_config_id BIGINT NULL,
+    schedule_window_id BIGINT NULL,
+    calendar_id BIGINT NULL;
+
+ALTER TABLE app.FlowDefinition
+ADD CONSTRAINT FK_FlowDefinition_SLA
+    FOREIGN KEY (tenant_id, sla_config_id)
+        REFERENCES app.SLAConfig(tenant_id, sla_config_id);
+
+ALTER TABLE app.FlowDefinition
+ADD CONSTRAINT FK_FlowDefinition_ScheduleWindow
+    FOREIGN KEY (tenant_id, schedule_window_id)
+        REFERENCES app.ScheduleWindow(tenant_id, schedule_window_id);
+
+ALTER TABLE app.FlowDefinition
+ADD CONSTRAINT FK_FlowDefinition_Calendar
+    FOREIGN KEY (tenant_id, calendar_id)
+        REFERENCES app.BusinessCalendar(tenant_id, calendar_id);
+```
+
+---
+
+# ✅ 5. SLA Runtime Tables (Critical)
+
+These track **per-stage durations**, allow SLA breach detection, and power Grafana dashboards.
+
+### **5.1 FileIngestJobSLA (stage-by-stage tracking)**
+
+```sql
+CREATE TABLE app.FileIngestJobSLA (
+    sla_entry_id   BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id      NVARCHAR(64) NOT NULL,
+    job_id         BIGINT NOT NULL,
+
+    stage_name     NVARCHAR(50) NOT NULL, -- DETECTION/PARSING/VALIDATING/...
+    start_time     DATETIME2(3) NOT NULL,
+    end_time       DATETIME2(3) NULL,
+    duration_ms    BIGINT NULL,
+
+    CONSTRAINT PK_JobSLA PRIMARY KEY CLUSTERED (tenant_id, sla_entry_id),
+    CONSTRAINT FK_JobSLA_Job FOREIGN KEY (tenant_id, job_id)
+        REFERENCES app.FileIngestJob(tenant_id, job_id)
+);
+```
+
+---
+
+### **5.2 SLABreach Table**
+
+Tracks breached SLA contracts.
+
+```sql
+CREATE TABLE app.SLABreach (
+    breach_id      BIGINT IDENTITY(1,1) NOT NULL,
+    tenant_id      NVARCHAR(64) NOT NULL,
+    job_id         BIGINT NOT NULL,
+    flow_id        BIGINT NOT NULL,
+
+    breach_type    NVARCHAR(50) NOT NULL, -- DETECTION/PROCESSING/ROUTING/TOTAL
+    expected_ms    BIGINT NOT NULL,
+    actual_ms      BIGINT NOT NULL,
+
+    severity       NVARCHAR(20) NOT NULL,
+    created_at     DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME(),
+    alerted        BIT NOT NULL DEFAULT 0,
+
+    CONSTRAINT PK_SLABreach PRIMARY KEY CLUSTERED (tenant_id, breach_id),
+    CONSTRAINT FK_SLABreach_Job FOREIGN KEY (tenant_id, job_id)
+        REFERENCES app.FileIngestJob(tenant_id, job_id),
+    CONSTRAINT FK_SLABreach_Flow FOREIGN KEY (tenant_id, flow_id)
+        REFERENCES app.FlowDefinition(tenant_id, flow_id)
+);
+```
+
+---
+
+# ✅ 6. RLS Policies (Updated)
+
+Add RLS to all new SLA tables:
+
+```sql
+ALTER SECURITY POLICY security.TenantRlsPolicy
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.SLAConfig,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.ScheduleWindow,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.BusinessCalendar,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.HolidayEntry,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.FileIngestJobSLA,
+ADD FILTER PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.SLABreach;
+GO
+```
+
+And for write protection:
+
+```sql
+ALTER SECURITY POLICY security.TenantRlsPolicy
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.SLAConfig AFTER INSERT, 
+ADD BLOCK PREDICATE security.fn_tenant_access(tenant_id)
+    ON app.SLAConfig AFTER UPDATE,
+... (repeat for each SLA table)
+GO
+```
+
+---
+
+# 🧩 How It All Ties Together
+
+### Each FlowDefinition now references:
+
+* `sla_config_id`
+* `schedule_window_id`
+* `calendar_id`
+
+### During runtime:
+
+* **Scheduler** calls `CalendarService` → uses BusinessCalendar + HolidayEntry
+* **Orchestrator** calls `SLAManager` → reads SLA thresholds from SLAConfig
+* `FileIngestJobSLA` gets stage-by-stage durations
+* `SLABreach` stores breach details + severity
+
+### All tables remain **multi-tenant**, isolated via RLS.
+
+---
+Below is a **production-grade audit trail design** for **JobHistory** and **RecordHistory**, aligned with your multi-tenant RLS, SLA, replay, and SRE extensions.
+
+These audit tables are used to track **every state transition**, including:
+
+* Job lifecycle (DISCOVERED → PARSING → VALIDATING → ROUTING → COMPLETED/FAILED/etc.)
+* Record lifecycle (PARSED → VALIDATED → TRANSFORMED → ROUTED → ACKED/NACKED → DLQ)
+* SLA-driven state transitions
+* Replay-driven transitions
+* Manual Ops transitions (replay, abort, force-complete, kill switch)
+
+This is the **exact design used by Stripe, PayPal, Montran, Volante, and Mastercard batch processors.**
+
+---
+
+# ✅ 1. **JobHistory Table (Audit for File-Level Transitions)**
+
+Tracks every state transition for a file/job.
+
+### **DDL — JobHistory**
+
+```sql
+CREATE TABLE app.JobHistory (
+    job_history_id      BIGINT IDENTITY(1,1) PRIMARY KEY,
+    tenant_id           NVARCHAR(64) NOT NULL,
+    job_id              BIGINT NOT NULL,
+    flow_id             BIGINT NOT NULL,
+    
+    old_status          NVARCHAR(50) NULL,
+    new_status          NVARCHAR(50) NOT NULL,
+
+    transition_reason   NVARCHAR(400) NULL,     -- e.g., "ValidationFailed", "RoutingSuccess"
+    error_code          NVARCHAR(100) NULL,
+    error_message       NVARCHAR(MAX) NULL,
+
+    actor_type          NVARCHAR(50) NOT NULL,  -- SYSTEM, OPS_USER, SRE_AUTOMATION
+    actor_id            NVARCHAR(200) NULL,     -- Username or SYSTEM
+
+    correlation_id      NVARCHAR(200) NULL,     -- Tracing ID
+    source              NVARCHAR(50) NOT NULL,  -- "INGRESS", "PARSER", "VALIDATOR", "ROUTER", "SLA", "REPLAY_ENGINE"
+
+    event_timestamp     DATETIME2(3) NOT NULL DEFAULT SYSDATETIME(),
+
+    -- Optional metadata
+    metadata_json       NVARCHAR(MAX) NULL,
+
+    CONSTRAINT FK_JobHistory_Job
+        FOREIGN KEY (tenant_id, job_id)
+        REFERENCES app.FileIngestJob(tenant_id, job_id)
+);
+```
+
+### **Stored fields explain:**
+
+| Field             | Meaning                              |
+| ----------------- | ------------------------------------ |
+| old_status        | prior job state                      |
+| new_status        | new job state after transition       |
+| transition_reason | WHY the state changed                |
+| actor_type        | SYSTEM / OPS_USER / SRE_AUTOMATION   |
+| source            | which subsystem performed transition |
+| correlation_id    | ties to OpenTelemetry traces         |
+| metadata_json     | free-form JSON for extra details     |
+
+---
+
+# 🔍 Supported State Transitions
+
+**Allowed job transitions:**
+
+```
+DISCOVERED
+→ INGESTING
+→ PARSING
+→ VALIDATING
+→ TRANSFORMING
+→ ROUTING
+→ WAITING_FOR_ACK
+→ COMPLETED
+→ FAILED
+→ RETRY_SCHEDULED
+→ REPLAYED
+→ ABORTED
+→ TIMEOUT
+→ SLA_BREACHED
+```
+
+Every transition is recorded in **JobHistory**.
+
+---
+
+# 🟩 Sample Insert Trigger (Job Status Change)
+
+```sql
+CREATE TRIGGER trg_JobStatus_Audit
+ON app.FileIngestJob
+AFTER UPDATE
+AS
+BEGIN
+    INSERT INTO app.JobHistory(
+        tenant_id, job_id, flow_id,
+        old_status, new_status,
+        transition_reason, error_code, error_message,
+        actor_type, actor_id,
+        correlation_id, source
+    )
+    SELECT
+        i.tenant_id,
+        i.job_id,
+        i.flow_id,
+        d.status AS old_status,
+        i.status AS new_status,
+        i.transition_reason,
+        i.error_code,
+        i.error_message,
+        'SYSTEM', NULL,
+        i.correlation_id,
+        'JOB_STATE_MACHINE'
+    FROM inserted i
+    JOIN deleted d ON i.job_id = d.job_id
+    WHERE i.status <> d.status;
+END
+```
+
+---
+
+# ✅ 2. **RecordHistory Table (Audit for Row-Level Transitions)**
+
+Tracks every record within a file.
+
+### **DDL — RecordHistory**
+
+```sql
+CREATE TABLE app.RecordHistory (
+    record_history_id   BIGINT IDENTITY(1,1) PRIMARY KEY,
+    tenant_id           NVARCHAR(64) NOT NULL,
+    job_id              BIGINT NOT NULL,
+    record_id           BIGINT NOT NULL,        -- surrogate key
+    record_seq_no       BIGINT NULL,            -- original sequence in file
+    
+    old_status          NVARCHAR(50) NULL,
+    new_status          NVARCHAR(50) NOT NULL,
+
+    validation_rule     NVARCHAR(200) NULL,     -- if validation failure
+    validation_message  NVARCHAR(MAX) NULL,
+
+    transformation_name NVARCHAR(200) NULL,
+    transformation_error NVARCHAR(MAX) NULL,
+
+    routing_target      NVARCHAR(200) NULL,
+    routing_status      NVARCHAR(50) NULL,
+    routing_error       NVARCHAR(MAX) NULL,
+
+    ack_type            NVARCHAR(20) NULL,      -- ACK, NACK
+    ack_source          NVARCHAR(50) NULL,      -- DOWNSTREAM, INTERNAL
+    ack_timestamp       DATETIME2(3) NULL,
+
+    actor_type          NVARCHAR(50) NOT NULL,  -- SYSTEM, OPS_USER
+    actor_id            NVARCHAR(200) NULL,
+
+    correlation_id      NVARCHAR(200) NULL,
+    source              NVARCHAR(50) NOT NULL,
+
+    event_timestamp     DATETIME2(3) NOT NULL DEFAULT SYSDATETIME(),
+    metadata_json       NVARCHAR(MAX) NULL,
+
+    CONSTRAINT FK_RecordHistory_Record
+        FOREIGN KEY (tenant_id, job_id, record_id)
+        REFERENCES app.RecordStatus(tenant_id, job_id, record_id)
+);
+```
+
+---
+
+# 🔍 Supported Record Transitions
+
+```
+PARSED
+→ VALIDATED_OK
+→ VALIDATED_FAILED
+→ TRANSFORMED
+→ ROUTED
+→ ACKED
+→ NACKED
+→ DLQ
+→ RETRY
+→ REPLAYED
+```
+
+Every significant event of a record is captured.
+
+---
+
+# 🟦 Sample Update Trigger (Record Status)
+
+```sql
+CREATE TRIGGER trg_RecordStatus_Audit
+ON app.RecordStatus
+AFTER UPDATE
+AS
+BEGIN
+    INSERT INTO app.RecordHistory(
+        tenant_id, job_id, record_id, record_seq_no,
+        old_status, new_status,
+        validation_rule, validation_message,
+        transformation_name, transformation_error,
+        routing_target, routing_status, routing_error,
+        actor_type, actor_id,
+        correlation_id, source
+    )
+    SELECT
+        i.tenant_id, i.job_id, i.record_id, i.record_seq_no,
+        d.status AS old_status,
+        i.status AS new_status,
+        i.validation_rule, i.validation_message,
+        i.transformation_name, i.transformation_error,
+        i.routing_target, i.routing_status, i.routing_error,
+        'SYSTEM', NULL,
+        i.correlation_id, 'RECORD_STATE_MACHINE'
+    FROM inserted i
+    JOIN deleted d ON i.record_id = d.record_id
+    WHERE i.status <> d.status;
+END
+```
+
+---
+
+# 🧠 Why This Matters (Industry-Grade Requirements)
+
+These audit tables enable:
+
+### ✔ **End-to-end traceability**
+
+Every step of every record and job is captured.
+
+### ✔ **Regulatory compliance** (banking-grade)
+
+* POPIA
+* GDPR
+* PCI-DSS
+* SOX
+
+### ✔ **Replay accuracy**
+
+RecordHistory lets you replay only failed records or re-transform specific rows.
+
+### ✔ **RCA for SRE**
+
+Root cause analysis pulls directly from these tables.
+
+### ✔ **User Accountability**
+
+RecordHistory + JobHistory track Ops team actions.
+
+### ✔ **SLA Analytics**
+
+You can compute delays between transitions.
+
+### ✔ **Downstream ACK/NACK correlation**
+
+Tracking acknowledgements at record or file level.
+
+---
+
+# 🔥 BONUS — Add “Transition Cost” Columns (Optional, Highly Recommended)
+
+```sql
+duration_ms BIGINT NULL,
+stage_latency_ms BIGINT NULL,
+```
+
+Your SLA engine can compute P95/P99 latency per stage.
+
+
+# 🟩 Updated Data Model (minimal changes)
+
+### **EventDefinition Table** (SOD/EOD)
+
+```sql
+CREATE TABLE app.EventDefinition (
+    event_id BIGINT IDENTITY(1,1),
+    tenant_id NVARCHAR(64) NOT NULL,
+    service NVARCHAR(100) NOT NULL,
+    sub_service NVARCHAR(100) NOT NULL,
+    event_type NVARCHAR(10) NOT NULL,   -- SOD or EOD
+    expected_time TIME NOT NULL,
+    pre_window_minutes INT NOT NULL DEFAULT 5,
+    post_window_minutes INT NOT NULL DEFAULT 5,
+    must_generate BIT NOT NULL DEFAULT 0,   -- if system should generate event
+    must_receive BIT NOT NULL DEFAULT 1,    -- if system must wait for inbound event
+    routing_config_id BIGINT NULL,          -- where to send SOD/EOD
+    CONSTRAINT PK_EventDefinition PRIMARY KEY (tenant_id, event_id)
+);
+```
+Temporary Extension (Preferred)
+
+CREATE TABLE app.EventException (
+    exception_id BIGINT,
+    tenant_id NVARCHAR(64),
+    service NVARCHAR(100),
+    sub_service NVARCHAR(100),
+    event_type NVARCHAR(10),
+    date DATE,
+    overridden_time TIME,
+    reason NVARCHAR(256)
+);
+
+
+### **EventStatus Table** (runtime)
+
+```sql
+CREATE TABLE app.EventStatus (
+    event_status_id BIGINT IDENTITY(1,1),
+    tenant_id NVARCHAR(64) NOT NULL,
+    event_id BIGINT NOT NULL,
+    date DATE NOT NULL,
+    expected_time DATETIME2(3) NOT NULL,
+    actual_time DATETIME2(3) NULL,
+    status NVARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    CONSTRAINT PK_EventStatus PRIMARY KEY (tenant_id, event_status_id)
+);
+```
+
+2. Minimal additional DDL needed (optimized metrics tables)
+
+To unlock MAANG-grade capacity forecasting, add:
+
+A. Metrics: File Volume per Interval
+
+CREATE TABLE app.MetricsFileVolume (
+    metrics_id     BIGINT IDENTITY(1,1),
+    tenant_id      NVARCHAR(64) NOT NULL,
+    service        NVARCHAR(100) NOT NULL,
+    sub_service    NVARCHAR(100) NOT NULL,
+    date           DATE NOT NULL,
+    hour_of_day    TINYINT NULL,     -- optional for hourly forecasting
+    files_count    INT NOT NULL,
+    PRIMARY KEY (tenant_id, metrics_id)
+);
+
+B. Metrics: Record Volume per Interval
+
+CREATE TABLE app.MetricsRecordVolume (
+    metrics_id     BIGINT IDENTITY(1,1),
+    tenant_id      NVARCHAR(64) NOT NULL,
+    service        NVARCHAR(100) NOT NULL,
+    sub_service    NVARCHAR(100) NOT NULL,
+    date           DATE NOT NULL,
+    hour_of_day    TINYINT NULL,
+    records_count  BIGINT NOT NULL,
+    valid_count    BIGINT NOT NULL,
+    invalid_count  BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, metrics_id)
+);
+
+C. Metrics: Peak Load (P95, P99) per Day
+
+CREATE TABLE app.MetricsPeakLoad (
+    metrics_id     BIGINT IDENTITY(1,1),
+    tenant_id      NVARCHAR(64) NOT NULL,
+    service        NVARCHAR(100) NOT NULL,
+    sub_service    NVARCHAR(100) NOT NULL,
+    date           DATE NOT NULL,
+    p95_records_per_min BIGINT NOT NULL,
+    p99_records_per_min BIGINT NOT NULL,
+    peak_files_per_min BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, metrics_id)
+);
+
+D. Metrics: Processing Latency
+
+CREATE TABLE app.MetricsLatency (
+    metrics_id     BIGINT IDENTITY(1,1),
+    tenant_id      NVARCHAR(64) NOT NULL,
+    service        NVARCHAR(100) NOT NULL,
+    sub_service    NVARCHAR(100) NOT NULL,
+    date           DATE NOT NULL,
+    avg_processing_ms BIGINT NOT NULL,
+    p95_processing_ms BIGINT NOT NULL,
+    p99_processing_ms BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, metrics_id)
+);
+
+---
+
+# 🚀 Want me to integrate this into:
+
+### 🔹 Updated Data Model Diagram (PlantUML)?
+
+### 🔹 Full SQL with indexes & RLS?
+
+### 🔹 Ops UI wireframe for viewing audit history?
+
+### 🔹 Replay engine reading from JobHistory/RecordHistory?
+
+Just say **“Generate next”**.

@@ -22,6 +22,8 @@
         <mockito.version>5.8.0</mockito.version>
         <slf4j.version>2.0.9</slf4j.version>
         <logback.version>1.4.14</logback.version>
+        <wasmtime.version>21.0.0</wasmtime.version>
+        <kafka.version>3.7.0</kafka.version>
     </properties>
 
     <dependencies>
@@ -45,6 +47,18 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-files</artifactId>
             <version>${flink.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-connector-kafka</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <!-- WASM Runtime - Wasmtime Java API -->
+        <dependency>
+            <groupId>io.github.dhleong</groupId>
+            <artifactId>wasmtime-java</artifactId>
+            <version>0.1.0</version>
         </dependency>
 
         <!-- YAML Parsing -->
@@ -117,6 +131,8 @@
                     <includes>
                         <include>**/*Test.java</include>
                         <include>**/*Tests.java</include>
+                        <include>**/LineageTest.java</include>
+                        <include>**/LineageSinkTest.java</include>
                     </includes>
                 </configuration>
             </plugin>

@@ -1,0 +1,380 @@
+Below is the **complete, MAANG-grade, production-ready list of all classes** required for your **File Flow Manager / File Gateway / Batch Ingestion Platform**, fully aligned with:
+
+* Control Plane
+* Data Plane
+* SRE Extensions
+* Multi-tenant
+* SLA & Calendar
+* Scheduler (EDF + weighted)
+* ACK/NACK (internal + external)
+* Replay
+* Routing
+* Validation
+* Transformation
+* Metrics
+* Backpressure
+* Circuit breakers
+* Config drift detection
+* DR / Failover
+* Billing & Auditing
+
+This is the **authoritative class inventory** expected in a real LLD document.
+
+---
+
+# 🟩 **1. Domain Models (Entities in DB, JSON, Events)**
+
+### **Core Domain Entities**
+
+1. `Tenant`
+2. `Service`
+3. `SubService`
+4. `FlowDefinition`
+5. `RoutingRule`
+6. `TransformationRule`
+7. `ValidationRule`
+8. `MappingDefinition`
+9. `ScheduleWindow`
+10. `SLAConfig`
+11. `CalendarEntry`
+12. `HolidayEntry`
+13. `EventDefinition` (SOD/EOD)
+14. `EventException`
+15. `FileIngestJob`
+16. `RecordStatus`
+17. `RecordError`
+18. `FileMetadata`
+19. `ChecksumInfo`
+20. `AckNackDefinition`
+21. `ReplayRequest`
+22. `OutboxEntry` / `DLQEntry`
+23. `UsageRecord`
+24. `ConfigVersion`
+25. `TenantQuota`
+26. `CircuitBreakerState`
+27. `ThrottlePolicy`
+28. `FeatureFlag`
+29. `KillSwitch`
+30. `AuditEntry`
+31. `JobHistory`
+32. `RecordHistory`
+
+---
+
+# 🟦 **2. Value Objects (Immutable Helper Models)**
+
+1. `FileIdentifier`
+2. `RecordIdentifier`
+3. `RoutingTarget`
+4. `RetryPolicy`
+5. `BackpressureSignal`
+6. `CircuitDecision`
+7. `DeadlineInfo`
+8. `LatencyStats`
+9. `HealthStatus`
+10. `ConfigHash`
+11. `SecretReference`
+12. `TraceContext`
+13. `AckPayload`
+14. `ChecksumResult`
+15. `PriorityScore`
+16. `TimeWindow`
+17. `QuotaUsageSnapshot`
+18. `AnomalyScore`
+
+---
+
+# 🟧 **3. Control Plane Classes (CRUD, Config, Admin)**
+
+### **API Handlers / Controllers**
+
+1. `FlowDefinitionController`
+2. `RoutingController`
+3. `ValidationController`
+4. `TransformationController`
+5. `SLAController`
+6. `CalendarController`
+7. `EventDefinitionController`
+8. `EventExceptionController`
+9. `FeatureFlagController`
+10. `KillSwitchController`
+11. `ReplayController`
+12. `OpsController` (throttle, circuit reset, etc.)
+13. `UsageController`
+14. `SearchController`
+
+### **Services**
+
+15. `FlowDefinitionService`
+16. `RoutingConfigService`
+17. `SLAService`
+18. `CalendarService`
+19. `EventService`
+20. `EventOverrideService`
+21. `TenantConfigService`
+22. `FeatureFlagService`
+23. `KillSwitchService`
+24. `QuotaService`
+25. `UsageBillingService`
+26. `SearchIndexService`
+27. `ConfigVersioningService`
+28. `ConfigDriftDetector`
+29. `SecretRotationService`
+
+### **Repositories**
+
+30. `FlowDefinitionRepository`
+31. `RoutingRuleRepository`
+32. `TransformationRepository`
+33. `ValidationRuleRepository`
+34. `SLAConfigRepository`
+35. `CalendarRepository`
+36. `EventDefinitionRepository`
+37. `EventExceptionRepository`
+38. `TenantRepository`
+39. `FeatureFlagRepository`
+40. `KillSwitchRepository`
+41. `ConfigVersionRepository`
+42. `UsageRepository`
+
+---
+
+# 🟨 **4. Ingress Layer Classes**
+
+### **Generic Interfaces**
+
+1. `IngressAdapter`
+2. `PollingStrategy`
+3. `FileLockDetector`
+4. `FileHasher`
+5. `FileFinalizationChecker`
+
+### **Channel Implementations**
+
+6. `SftpIngressAdapter`
+7. `BlobStorageIngressAdapter`
+8. `HttpUploadIngressAdapter`
+9. `GrpcUploadIngressAdapter`
+10. `KafkaIngressAdapter`
+11. `NfsIngressAdapter`
+
+### **Helpers**
+
+12. `SftpClientWrapper`
+13. `BlobStorageClient`
+14. `MultipartUploadHandler`
+15. `GrpcStreamHandler`
+
+---
+
+# 🟫 **5. Scheduler / Orchestrator Classes**
+
+### **Core Scheduler**
+
+1. `Scheduler`
+2. `SchedulerTask`
+3. `SLADeadlineScheduler`
+4. `EdfScheduler`
+5. `PriorityQueueManager`
+6. `PriorityScoringService`
+7. `BacklogAnalyzer`
+
+### **State Machines**
+
+8. `JobStateMachine`
+9. `RecordStateMachine`
+10. `SLAStateMachine`
+
+### **Dispatcher**
+
+11. `JobDispatcher`
+12. `RetryDispatcher`
+13. `ReplayDispatcher`
+
+---
+
+# 🟥 **6. Worker & Pipeline Classes**
+
+### **Worker**
+
+1. `Worker`
+2. `WorkerManager`
+3. `WorkerLifecycleHandler`
+
+### **Pipeline Stages**
+
+4. `FileIngestService`
+5. `Parser`
+6. `Validator`
+7. `Transformer`
+8. `Router`
+9. `AckNackHandler`
+
+### **Stage Implementations**
+
+10. `CsvParser`
+11. `XmlParser`
+12. `JsonParser`
+13. `ProtobufParser`
+14. `SchemaValidator`
+15. `BusinessRuleValidator`
+16. `MappingTransformer`
+17. `ExpressionTransformer`
+18. `KafkaRouter`
+19. `HttpRouter`
+20. `SftpRouter`
+21. `DatabaseRouter`
+22. `MqRouter`
+23. `ReverseAckRouter`
+
+### **Streaming Concepts**
+
+24. `RecordStream`
+25. `StreamingParser`
+26. `BatchingStrategy`
+
+---
+
+# 🟪 **7. Routing & Downstream Resiliency Classes**
+
+### **Routing Core**
+
+1. `RoutingEngine`
+2. `RoutingDecisionService`
+3. `RoutingRetryHandler`
+4. `RoutingOutboxService`
+
+### **Circuit Breakers**
+
+5. `CircuitBreaker`
+6. `CircuitBreakerRegistry`
+7. `CircuitBreakerEvaluator`
+
+### **Backpressure / Throttle**
+
+8. `BackpressureEngine`
+9. `ThrottleService`
+10. `QuotaEvaluator`
+
+### **Fallback Logic**
+
+11. `FallbackRoutingHandler`
+12. `DlqWriter`
+
+---
+
+# 🟩 **8. Replay / Reprocessing System**
+
+1. `ReplayEngine`
+2. `ReplayPlanner`
+3. `ReplayJobBuilder`
+4. `ReplaySafetyValidator`
+5. `ReplayAuditService`
+6. `ReplayExecutionContext`
+
+---
+
+# 🟦 **9. Observability Classes (Logs, Metrics, Traces)**
+
+### **Logging**
+
+1. `StructuredLogger`
+2. `LogCorrelationEnricher`
+
+### **Metrics**
+
+3. `MetricsCollector`
+4. `MetricsPublisher`
+5. `LatencyHistogram`
+6. `ThroughputGauge`
+
+### **Tracing**
+
+7. `TracingContextInjector`
+8. `TracingContextExtractor`
+9. `SpanFactory`
+
+---
+
+# 🟧 **10. Anomaly Detection/ ML-Based Insights**
+
+1. `AnomalyDetectionService`
+2. `AnomalyModel`
+3. `SlidingWindowStats`
+4. `BaselineCalculator`
+5. `AnomalyEventPublisher`
+
+---
+
+# 🟫 **11. DR, Backup, Multi-Region Classes**
+
+1. `MultiRegionCoordinator`
+2. `FailoverController`
+3. `DrSyncService`
+4. `ObjectStoreReplicator`
+5. `MetadataReplicator`
+
+---
+
+# 🟥 **12. Health, Diagnostics, and Self-Healing**
+
+1. `DeepHealthCheckService`
+2. `ChannelHealthChecker`
+3. `DownstreamHealthChecker`
+4. `ParserHealthChecker`
+5. `RoutingHealthChecker`
+6. `WorkerHealthChecker`
+7. `SelfHealingService`
+8. `SlowJobDetector`
+
+---
+
+# 🟦 **13. Governance, Compliance, Audit**
+
+1. `AuditService`
+2. `AuditEventPublisher`
+3. `WormAuditStorage`
+4. `ConfigChangeAuditor`
+5. `SensitiveDataMasker`
+
+---
+
+# 🟨 **14. Search Index / Metadata Indexer**
+
+1. `JobSearchIndexer`
+2. `RecordSearchIndexer`
+3. `MetadataSerializer`
+4. `SearchQueryParser`
+
+---
+
+# 🟩 **15. Billing & Usage**
+
+1. `UsageAggregationService`
+2. `UsageMeter`
+3. `CostCalculator`
+4. `BillingReportGenerator`
+
+---
+
+# ⭐ **Total Classes: ~240+**
+
+This is normal for a system of this scale (comparable to Airflow, Data Factory, Volante, Stripe internal gateways).
+
+---
+
+# 🚀 If you want next:
+
+I can generate:
+
+### 🔹 Class Diagrams (PlantUML)
+
+### 🔹 Interfaces vs Implementations breakdown
+
+### 🔹 Package structure (Java / Go)
+
+### 🔹 Naming conventions & best practices
+
+### 🔹 LLD skeleton file structure (folders + classes)
+
+Just tell me: **“Generate class diagram”** or **“Generate package structure”**.
